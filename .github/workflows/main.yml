@@ -1,0 +1,101 @@
+name: Build iOS IPA (unsigned)
+
+# ============================================================
+# 用途：不需要 Mac、不需要 Xcode，借 GitHub 免费的 macOS 机器把 ipa 编出来。
+#
+# 用法（详见仓库根目录的 IOS_CLOUD_BUILD.md）：
+#   1. 把 ios_build_src.zip 上传到仓库根目录；
+#   2. 网页上新建本文件 .github/workflows/ios-unsigned-ipa.yml（内容就是这段）；
+#   3. 仓库页面 → Actions → 左侧 “Build iOS IPA (unsigned)” → Run workflow；
+#   4. 等 10~20 分钟，在该次运行页面底部的 Artifacts 下载 SoundMeter-unsigned-ipa。
+#
+# 产物是「未签名 ipa」，需要回到 Windows 用 Sideloadly 配 Apple ID 签名后装机。
+# ============================================================
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    # macos-15 = macOS 15 + Xcode 16.x，是当前最稳的组合。
+    # 如果哪天这个镜像下线了，改成 macos-latest 即可。
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      # 自动兼容三种摆放方式：zip / 散在根目录 / 多一层 sound_meter 目录
+      - name: 0. 定位源码目录
+        run: |
+          set -e
+          if [ -f ios_build_src.zip ]; then
+            echo "发现 ios_build_src.zip，解压中…"
+            unzip -q -o ios_build_src.zip -d _src
+            rm -f ios_build_src.zip
+            PROJ=_src
+          elif [ -f pubspec.yaml ]; then
+            PROJ=.
+          elif [ -f sound_meter/pubspec.yaml ]; then
+            PROJ=sound_meter
+          else
+            echo "::error::仓库里找不到 pubspec.yaml，请确认 ios_build_src.zip 已上传到根目录"
+            exit 1
+          fi
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          echo "项目目录：$PROJ"
+          ls "$PROJ"
+
+      - name: 1. 选定 Xcode（自动挑构建机上最新的稳定版）
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: 2. 打印构建机环境（出问题好排查）
+        run: |
+          sw_vers
+          xcodebuild -version
+
+      - name: 3. 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          # 与开发时一致的版本；若提示找不到该版本，把这里改成 stable
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: true
+
+      - name: 4. 拉取 Dart 依赖
+        run: |
+          cd "$PROJ"
+          flutter --version
+          flutter pub get
+
+      - name: 5. CocoaPods 安装原生依赖
+        run: |
+          cd "$PROJ/ios"
+          pod install --repo-update
+
+      # --no-codesign：没有开发者证书也能编出完整 Runner.app，只是不能直接上架
+      - name: 6. 编译 Release（不签名）
+        run: |
+          cd "$PROJ"
+          flutter build ios --release --no-codesign
+
+      - name: 7. 打成 ipa
+        run: |
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/out/Payload"
+          cp -R "$PROJ/build/ios/iphoneos/Runner.app" "$GITHUB_WORKSPACE/out/Payload/"
+          cd "$GITHUB_WORKSPACE/out"
+          zip -qry "$GITHUB_WORKSPACE/out/SoundMeter-unsigned.ipa" Payload
+          ls -lh "$GITHUB_WORKSPACE/out/SoundMeter-unsigned.ipa"
+
+      - name: 8. 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoundMeter-unsigned-ipa
+          path: out/SoundMeter-unsigned.ipa
+          retention-days: 14
